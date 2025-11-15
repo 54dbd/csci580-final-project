@@ -91,36 +91,6 @@ This fire simulation uses a GPU-based particle system where particles are stored
    - Particle blending and transparency
    - Glow/bloom effects
 
-### Implementation Steps
-
-1. **Initialize Particle Data** - Create textures to store particle properties
-2. **Particle Update Pass** - Use ping-pong buffers to update particle state
-3. **Particle Rendering Pass** - Render particles as points with additive blending
-4. **Visual Effects** - Apply heat-based color gradients and transparency
-
-Example particle rendering approach:
-
-```glsl
-// Vertex Shader - Transform particle positions
-attribute vec2 aParticleUV;
-uniform sampler2D uParticleData;
-
-void main() {
-    vec4 data = texture2D(uParticleData, aParticleUV);
-    vec2 position = data.xy;
-    gl_Position = vec4(position, 0.0, 1.0);
-    gl_PointSize = 5.0;
-}
-
-// Fragment Shader - Color based on temperature
-uniform float uTemperature;
-
-void main() {
-    // Hot = white/yellow, Medium = orange, Cool = red
-    vec3 color = mix(vec3(1.0, 0.2, 0.0), vec3(1.0, 1.0, 0.8), uTemperature);
-    gl_FragColor = vec4(color, 0.5);
-}
-```
 
 ### Utility Functions
 
