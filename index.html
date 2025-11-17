@@ -31,6 +31,20 @@
   </head>
   <body>
     <canvas id="canvas"></canvas>
+    <div id="panel" style="position:fixed;top:12px;left:12px;padding:10px 12px;background:rgba(20,20,20,0.75);color:#eee;font-family:system-ui,Segoe UI,Arial;font-size:12px;border-radius:8px;backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,0.08);">
+      <div style="margin-bottom:6px;font-weight:600;">Fire Controls</div>
+      <label>Particles: <select id="texSize"><option>128</option><option selected>256</option><option>512</option></select></label>
+      <br/>
+      <label>Upward: <input id="forceUp" type="range" min="0.1" max="0.6" step="0.01" value="0.35"/></label>
+      <br/>
+      <label>Damping: <input id="damping" type="range" min="0.90" max="0.995" step="0.001" value="0.965"/></label>
+      <br/>
+      <label>Noise: <input id="noise" type="range" min="0.00" max="0.20" step="0.005" value="0.06"/></label>
+      <br/>
+      <label>Vy Max: <input id="vyMax" type="range" min="0.3" max="1.0" step="0.01" value="0.6"/></label>
+      <br/>
+      <label>Spawn: <input id="spawn" type="range" min="0.0" max="0.15" step="0.005" value="0.02"/></label>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
