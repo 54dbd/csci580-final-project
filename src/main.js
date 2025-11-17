@@ -28,7 +28,26 @@ resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 
 const isWebGL2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
-const params = { texSize: 256, forceUp: 0.35, damping: 0.965, noise: 0.06, vyMax: 0.6, spawn: 0.02, buoy: 0.8, vorticity: 1.5, dissV: 0.995, dissT: 0.992, srcIntensity: 0.35, srcRadius: 0.06, warmth: 1.0, brightness: 1.0 };
+// 可调参数：粒子/场尺寸、动力学与视觉映射
+const params = {
+  texSize: 256,
+  forceUp: 0.35,    // 粒子上升力（保留少量对粒子的直接控制）
+  damping: 0.965,   // 粒子速度阻尼
+  noise: 0.06,      // 粒子横向噪声幅度
+  vyMax: 0.6,       // 粒子最大上升速度
+  spawn: 0.02,      // 持续点火概率
+  buoy: 0.8,        // 热浮力系数
+  vorticity: 1.5,   // 涡度约束强度
+  dissV: 0.995,     // 速度耗散
+  dissT: 0.992,     // 温度耗散
+  srcIntensity: 0.35, // 底部热源强度
+  srcRadius: 0.06,  // 底部热源半径
+  warmth: 0.95,     // 色温偏移
+  brightness: 0.9,  // 亮度缩放
+  gamma: 1.6,       // 颜色Gamma
+  lowCut: 0.1,      // 低温截断
+  highCut: 0.85     // 高温截断
+};
 let program = null;
 let updateProgram = null;
 let renderProgram = null;
@@ -53,6 +72,11 @@ let fbTempB = null;
 let texSize = params.texSize;
 let particleCount = texSize * texSize;
 if (isWebGL2) {
+  // 编译各Pass程序：
+  // - updateProgram：通用全屏顶点 + 粒子/场片元（复用顶点着色器）
+  // - velAdvectProgram：速度半拉格朗日对流
+  // - tempAdvectProgram：温度半拉格朗日对流 + 底部热源
+  // - velForceProgram：涡度约束 + 热浮力施力
   const ext = gl.getExtension('EXT_color_buffer_float');
   const uVS = compileShader(gl, gl.VERTEX_SHADER, updateVert);
   const uFS = compileShader(gl, gl.FRAGMENT_SHADER, updateFrag);
@@ -76,6 +100,7 @@ if (isWebGL2) {
   gl.vertexAttribPointer(aPosLoc, 2, gl.FLOAT, false, 0, 0);
   gl.bindVertexArray(null);
   vaoRender = createVertexArray(gl);
+  // 初始化粒子状态：底部喷口附近位置与向上速度
   const init = new Float32Array(particleCount * 4);
   for (let i = 0; i < particleCount; i++) {
     const rx = Math.random();
@@ -90,6 +115,7 @@ if (isWebGL2) {
     init[o + 2] = vx;
     init[o + 3] = vy;
   }
+  // 双缓冲纹理与FBO：粒子、速度、温度
   stateTexA = createFloatTexture(gl, texSize, texSize, init);
   stateTexB = createFloatTexture(gl, texSize, texSize, null);
   velTexA = createFloatTexture(gl, texSize, texSize, null);
@@ -132,6 +158,9 @@ let rTimeLocation = null;
 let rTempSamplerLocation = null;
 let rWarmthLocation = null;
 let rBrightnessLocation = null;
+let rGammaLocation = null;
+let rLowCutLocation = null;
+let rHighCutLocation = null;
 let vAdvDeltaLocation = null;
 let vAdvDissLocation = null;
 let tAdvDeltaLocation = null;
@@ -150,6 +179,7 @@ if (!isWebGL2) {
   timeLocation = gl.getUniformLocation(program, 'uTime');
   resolutionLocation = gl.getUniformLocation(program, 'uResolution');
 } else {
+  // 位置/Uniform查询（WebGL2路径）
   uPosLocation = gl.getAttribLocation(updateProgram, 'aPos');
   uDeltaLocation = gl.getUniformLocation(updateProgram, 'uDelta');
   uTimeLocation = gl.getUniformLocation(updateProgram, 'uTime');
@@ -168,6 +198,9 @@ if (!isWebGL2) {
   rTempSamplerLocation = gl.getUniformLocation(renderProgram, 'uTempTex');
   rWarmthLocation = gl.getUniformLocation(renderProgram, 'uWarmth');
   rBrightnessLocation = gl.getUniformLocation(renderProgram, 'uBrightness');
+  rGammaLocation = gl.getUniformLocation(renderProgram, 'uGamma');
+  rLowCutLocation = gl.getUniformLocation(renderProgram, 'uLowCut');
+  rHighCutLocation = gl.getUniformLocation(renderProgram, 'uHighCut');
   vAdvDeltaLocation = gl.getUniformLocation(velAdvectProgram, 'uDelta');
   vAdvDissLocation = gl.getUniformLocation(velAdvectProgram, 'uDiss');
   tAdvDeltaLocation = gl.getUniformLocation(tempAdvectProgram, 'uDelta');
@@ -197,6 +230,7 @@ function render() {
   lastTime = now;
   gl.viewport(0, 0, canvas.width, canvas.height);
   if (isWebGL2) {
+    // Pass 1：速度对流
     gl.bindFramebuffer(gl.FRAMEBUFFER, vPing ? fbVelB : fbVelA);
     gl.viewport(0, 0, texSize, texSize);
     gl.useProgram(velAdvectProgram);
@@ -207,6 +241,7 @@ function render() {
     gl.uniform1f(vAdvDissLocation, params.dissV);
     gl.bindVertexArray(vaoUpdate);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Pass 2：温度对流 + 热源注入
     gl.bindFramebuffer(gl.FRAMEBUFFER, tPing ? fbTempB : fbTempA);
     gl.viewport(0, 0, texSize, texSize);
     gl.useProgram(tempAdvectProgram);
@@ -225,6 +260,7 @@ function render() {
     gl.uniform1f(gl.getUniformLocation(tempAdvectProgram,'uUpBase'), params.upBase);
     gl.bindVertexArray(vaoUpdate);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Pass 3：速度施力（涡度约束+热浮力）
     gl.bindFramebuffer(gl.FRAMEBUFFER, vPing ? fbVelA : fbVelB);
     gl.viewport(0, 0, texSize, texSize);
     gl.useProgram(velForceProgram);
@@ -241,6 +277,7 @@ function render() {
     gl.uniform1f(vForceDampLocation, params.dissV);
     gl.bindVertexArray(vaoUpdate);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Pass 4：粒子状态更新（采样速度/温度场）
     gl.bindFramebuffer(gl.FRAMEBUFFER, ping ? fbB : fbA);
     gl.viewport(0, 0, texSize, texSize);
     gl.useProgram(updateProgram);
@@ -264,6 +301,7 @@ function render() {
     gl.uniform1f(uSpawnLocation, params.spawn);
     gl.bindVertexArray(vaoUpdate);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // 屏幕渲染：点精灵叠加（加色混合）
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0, 0, 0, 1);
@@ -282,6 +320,9 @@ function render() {
     gl.uniform1i(rTempSamplerLocation, 1);
     gl.uniform1f(rWarmthLocation, params.warmth);
     gl.uniform1f(rBrightnessLocation, params.brightness);
+    gl.uniform1f(rGammaLocation, params.gamma);
+    gl.uniform1f(rLowCutLocation, params.lowCut);
+    gl.uniform1f(rHighCutLocation, params.highCut);
     gl.bindVertexArray(vaoRender);
     gl.drawArrays(gl.POINTS, 0, particleCount);
     gl.disable(gl.BLEND);
@@ -313,6 +354,9 @@ if (isWebGL2) {
   const elSpawn = document.getElementById('spawn');
   const elWarmth = document.createElement('input'); elWarmth.type='range'; elWarmth.min='0.5'; elWarmth.max='1.5'; elWarmth.step='0.01'; elWarmth.value=String(params.warmth);
   const elBright = document.createElement('input'); elBright.type='range'; elBright.min='0.5'; elBright.max='2.0'; elBright.step='0.01'; elBright.value=String(params.brightness);
+  const elGamma = document.createElement('input'); elGamma.type='range'; elGamma.min='0.8'; elGamma.max='2.5'; elGamma.step='0.01'; elGamma.value=String(params.gamma);
+  const elLow = document.createElement('input'); elLow.type='range'; elLow.min='0.0'; elLow.max='0.5'; elLow.step='0.01'; elLow.value=String(params.lowCut);
+  const elHigh = document.createElement('input'); elHigh.type='range'; elHigh.min='0.5'; elHigh.max='1.0'; elHigh.step='0.01'; elHigh.value=String(params.highCut);
   const elBuoy = document.createElement('input'); elBuoy.type='range'; elBuoy.min='0.0'; elBuoy.max='2.0'; elBuoy.step='0.05'; elBuoy.value=String(params.buoy);
   const elVort = document.createElement('input'); elVort.type='range'; elVort.min='0.0'; elVort.max='3.0'; elVort.step='0.05'; elVort.value=String(params.vorticity);
   const elSrcI = document.createElement('input'); elSrcI.type='range'; elSrcI.min='0.0'; elSrcI.max='1.0'; elSrcI.step='0.01'; elSrcI.value=String(params.srcIntensity);
@@ -322,6 +366,9 @@ if (isWebGL2) {
   const r3=document.createElement('div'); r3.textContent='TempSrc'; panel.appendChild(r3); panel.appendChild(elSrcI);
   const r4=document.createElement('div'); r4.textContent='Warmth'; panel.appendChild(r4); panel.appendChild(elWarmth);
   const r5=document.createElement('div'); r5.textContent='Brightness'; panel.appendChild(r5); panel.appendChild(elBright);
+  const r6=document.createElement('div'); r6.textContent='Gamma'; panel.appendChild(r6); panel.appendChild(elGamma);
+  const r7=document.createElement('div'); r7.textContent='LowCut'; panel.appendChild(r7); panel.appendChild(elLow);
+  const r8=document.createElement('div'); r8.textContent='HighCut'; panel.appendChild(r8); panel.appendChild(elHigh);
   function recreate(size) {
     texSize = size;
     particleCount = texSize * texSize;
@@ -370,6 +417,9 @@ if (isWebGL2) {
   });
   elWarmth.addEventListener('input', () => { params.warmth = parseFloat(elWarmth.value); });
   elBright.addEventListener('input', () => { params.brightness = parseFloat(elBright.value); });
+  elGamma.addEventListener('input', () => { params.gamma = parseFloat(elGamma.value); });
+  elLow.addEventListener('input', () => { params.lowCut = parseFloat(elLow.value); });
+  elHigh.addEventListener('input', () => { params.highCut = parseFloat(elHigh.value); });
   elBuoy.addEventListener('input', () => { params.buoy = parseFloat(elBuoy.value); });
   elVort.addEventListener('input', () => { params.vorticity = parseFloat(elVort.value); });
   elSrcI.addEventListener('input', () => { params.srcIntensity = parseFloat(elSrcI.value); });
