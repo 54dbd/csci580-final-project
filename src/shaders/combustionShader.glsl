@@ -41,7 +41,7 @@ void main () {
   float noise = 2.*(texture2D(uNoise, vUv).x - 0.5); // 零均值噪声 [-1, 1]
   
   // 可选：将噪声混合到燃料中（当前被注释掉）
-  // fuel += noise * noiseBlending;
+  fuel += noise * noiseBlending;
   
   // 步骤 1：冷却现有温度
   // 使用四次方模型模拟黑体辐射冷却

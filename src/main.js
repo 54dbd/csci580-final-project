@@ -39,6 +39,7 @@ import pressureIterationShaderSource from "./shaders/pressureIterationShader.gls
 import projectionShaderSource from "./shaders/projectionShader.glsl";         // 压力投影（使速度场无散）
 import rowShaderSource from "./shaders/rowShader.glsl";                        // 行着色器（在底部添加燃料）
 import splatShaderSource from "./shaders/splatShader.glsl";                    // 溅射着色器（添加局部扰动）
+import ellipticalSplatShaderSource from "./shaders/ellipticalSplatShader.glsl"; // 椭圆溅射着色器（用于边缘燃烧）
 import vorticityConfinementShaderSource from "./shaders/vorticityConfinementShader.glsl"; // 涡度限制（增强涡流效果）
 
 // ============================================================================
@@ -59,7 +60,7 @@ canvas.height = canvas.clientHeight; // 设置 canvas 高度为客户端高度
 let config = {
   BUOYANCY: 0.2,              // 浮力系数：控制热空气上升的强度（值越大，上升越快）
   BURN_TEMPERATURE: 1700,     // 燃烧温度阈值：燃料在此温度下开始燃烧
-  CONFINEMENT: 15,            // 涡度限制强度：增强涡流效果，使火焰更动态
+  CONFINEMENT: 50,            // 涡度限制强度：增强涡流效果，使火焰更动态
   COOLING: 3000,              // 冷却系数：控制温度下降的速度
   DISPLAY_MODE: 0,            // 显示模式索引：0=正常，1-6=各种调试模式
   DYE_RESOLUTION: 512,        // 密度（颜色）场分辨率：控制颜色细节（越高越清晰）
@@ -72,6 +73,14 @@ let config = {
   SIM_RESOLUTION: 256,        // 模拟分辨率：速度、温度等场的分辨率（影响性能）
   SPLAT_RADIUS: 0.7,          // 溅射半径：用户交互时添加扰动的范围（百分比）
   VELOCITY_DISSIPATION: 0.98, // 速度耗散率：每帧速度的衰减（模拟粘性）
+  IGNITION_MODE: 0,           // 点火方式：0=拖拽点火，1=燃烧瓶模式
+  MOLOTOV_GRAVITY: 800,       // 燃烧瓶重力加速度（像素/秒²）
+  MOLOTOV_BURN_RADIUS: 50,    // 燃烧区域半径（像素）
+  BURN_ZONE_LIFESPAN: 40.0,  // 燃烧区域寿命（秒），40秒后自动消失
+  BURN_ELLIPSE_LONG_AXIS: 200, // 椭圆长轴半径（像素）- 沿边缘方向
+  BURN_ELLIPSE_SHORT_AXIS: 45, // 椭圆短轴半径（像素）- 垂直于边缘方向
+  MOLOTOV_EXPLOSION_FORCE: 50.0, // 爆炸产生的速度场强度
+  MOLOTOV_EXPLOSION_RADIUS: 80.0, // 爆炸影响半径（像素）
 };
 
 /**
@@ -117,7 +126,7 @@ class FireSource {
     this.numParticles = numParticles; // 粒子总数
     // 如果生命周期为负数，则粒子永不死亡
     this.infiniteLifespan = !!(lifespan < 0.0);
-s
+
     // 获取纹理格式配置
     const rgba = ext.formatRGBA;  // RGBA 格式（用于存储位置和速度）
     const r = ext.formatR;        // 单通道格式（用于存储生命周期）
@@ -265,6 +274,387 @@ s
     gl.bindFramebuffer(gl.FRAMEBUFFER, destination);
     gl.drawArrays(gl.POINTS, 0, this.numParticles);
   }
+}
+
+// ============================================================================
+// Molotov 类 - 燃烧瓶
+// ============================================================================
+/**
+ * 燃烧瓶类
+ * 
+ * 表示一个可投掷的燃烧瓶，会在屏幕边缘创建燃烧区域
+ * 
+ * @param {number} x - 初始 X 坐标（像素）
+ * @param {number} y - 初始 Y 坐标（像素）
+ */
+class Molotov {
+  constructor(x, y) {
+    this.x = x;              // X 坐标
+    this.y = y;              // Y 坐标
+    this.vx = 0;             // X 方向速度
+    this.vy = 0;             // Y 方向速度
+    this.width = 30;         // 燃烧瓶宽度（像素）
+    this.height = 50;        // 燃烧瓶高度（像素）
+    this.active = true;      // 是否激活（未碰撞）
+    this.exploded = false;   // 是否已爆炸
+    this.isDragging = true;  // 是否正在被拖拽（跟随鼠标）
+  }
+
+  /**
+   * 更新燃烧瓶位置（重力下落）
+   * 
+   * @param {number} dt - 时间步长（秒）
+   */
+  update(dt) {
+    if (!this.active || this.exploded) return;
+
+    // 如果正在拖拽，不应用物理（位置由鼠标控制）
+    if (this.isDragging) {
+      return;
+    }
+
+    // 应用重力
+    this.vy += config.MOLOTOV_GRAVITY * dt;
+    
+    // 更新位置
+    this.y += this.vy * dt;
+    this.x += this.vx * dt;
+
+    // 检测碰撞屏幕边界
+    const margin = 5; // 边界检测容差
+    if (this.y + this.height >= canvas.height - margin ||
+        this.y <= margin ||
+        this.x <= margin ||
+        this.x + this.width >= canvas.width - margin) {
+      this.explode();
+    }
+  }
+
+  /**
+   * 爆炸：在碰撞位置创建燃烧区域并产生速度场
+   */
+  explode() {
+    if (this.exploded) return;
+    this.exploded = true;
+    this.active = false;
+
+    // 确定碰撞的边界
+    const margin = 5;
+    let edge = null;
+    let position = 0;
+    let explosionX = this.x + this.width / 2; // 爆炸中心 X 坐标
+    let explosionY = this.y + this.height / 2; // 爆炸中心 Y 坐标
+
+    if (this.y + this.height >= canvas.height - margin) {
+      // 底部边界
+      edge = 'bottom';
+      position = this.x;
+      explosionY = canvas.height - margin; // 调整到边界位置
+    } else if (this.y <= margin) {
+      // 顶部边界
+      edge = 'top';
+      position = this.x;
+      explosionY = margin;
+    } else if (this.x <= margin) {
+      // 左侧边界
+      edge = 'left';
+      position = this.y;
+      explosionX = margin;
+    } else if (this.x + this.width >= canvas.width - margin) {
+      // 右侧边界
+      edge = 'right';
+      position = this.y;
+      explosionX = canvas.width - margin;
+    }
+
+    if (edge) {
+      // 创建速度场扰动（爆炸冲击波）
+      createExplosionVelocity(explosionX, explosionY, edge);
+      
+      // 创建燃烧区域
+      createBurnZone(edge, position);
+    }
+  }
+}
+
+// ============================================================================
+// BurnZone 类 - 持续燃烧区域
+// ============================================================================
+/**
+ * 持续燃烧区域类
+ * 
+ * 在屏幕边缘创建持续添加燃料的区域
+ * 
+ * @param {string} edge - 边界类型：'top', 'bottom', 'left', 'right'
+ * @param {number} position - 碰撞位置（像素）
+ * @param {number} radius - 燃烧区域半径（像素）
+ */
+class BurnZone {
+  constructor(edge, position, radius) {
+    this.edge = edge;           // 边界类型
+    this.position = position;   // 碰撞位置（像素）
+    this.radius = radius;       // 燃烧区域半径（像素）
+    this.fuelIntensity = 1.0;   // 燃料强度
+    this.active = true;         // 是否激活
+    this.lifespan = config.BURN_ZONE_LIFESPAN; // 剩余寿命（秒）
+    this.maxLifespan = config.BURN_ZONE_LIFESPAN; // 最大寿命（用于计算强度衰减）
+    
+    // 计算归一化坐标（用于添加燃料）
+    this.calculateNormalizedCoords();
+  }
+
+  /**
+   * 更新燃烧区域寿命
+   * 
+   * @param {number} dt - 时间步长（秒）
+   */
+  update(dt) {
+    if (!this.active) return;
+
+    // 减少寿命
+    this.lifespan -= dt;
+
+    // 如果寿命耗尽，停用燃烧区域
+    if (this.lifespan <= 0) {
+      this.active = false;
+      this.lifespan = 0;
+      this.fuelIntensity = 0;
+    } else {
+      // 根据剩余寿命调整燃料强度（非线性衰减）
+      // 使用平方衰减：强度 = (剩余寿命 / 最大寿命)^2
+      // 这样开始时衰减慢，接近结束时衰减快，更符合真实燃烧行为
+      const lifeRatio = this.lifespan / this.maxLifespan;
+      // this.fuelIntensity = lifeRatio * lifeRatio; // 平方衰减
+      
+      // 可选：使用平滑衰减函数（smoothstep）使过渡更自然
+      this.fuelIntensity = lifeRatio * lifeRatio * (3.0 - 2.0 * lifeRatio);
+    }
+  }
+
+  /**
+   * 计算归一化坐标
+   */
+  calculateNormalizedCoords() {
+    // 根据边界类型确定添加燃料的位置
+    // 注意：WebGL 纹理坐标 Y 轴是翻转的（0 在底部，1 在顶部）
+    this.normX = this.position / canvas.width;
+    this.normY = this.radius / canvas.height;
+
+    // switch (this.edge) {
+    //   case 'bottom':
+    //     // 底部边界：Y 坐标接近 0（翻转后）
+    //     this.normX = this.position / canvas.width;
+    //     this.normY = this.radius / canvas.height;
+    //     break;
+    //   case 'top':
+    //     // 顶部边界：Y 坐标接近 1（翻转后）
+    //     this.normX = this.position / canvas.width;
+    //     this.normY = 1.0 - (this.radius / canvas.height);
+    //     break;
+    //   case 'left':
+    //     // 左侧边界
+    //     this.normX = this.radius / canvas.width;
+    //     this.normY = 1.0 - (this.position / canvas.height);
+    //     break;
+    //   case 'right':
+    //     // 右侧边界
+    //     this.normX = 1.0 - (this.radius / canvas.width);
+    //     this.normY = 1.0 - (this.position / canvas.height);
+    //     break;
+    // }
+    
+    this.normalizedRadius = this.radius / Math.max(canvas.width, canvas.height);
+  }
+
+  /**
+   * 持续添加燃料到燃料场
+   * 在屏幕边缘创建一个大的椭圆形燃烧区域
+   */
+  addFuel() {
+    if (!this.active) return;
+
+    gl.viewport(0, 0, simWidth, simHeight);
+    ellipticalSplatProgram.bind();
+    
+    // 绑定燃料纹理
+    gl.uniform1i(ellipticalSplatProgram.uniforms.uTarget, fuel.read.texId);
+    gl.uniform1f(ellipticalSplatProgram.uniforms.aspectRatio, canvas.width / canvas.height);
+    gl.uniform3f(ellipticalSplatProgram.uniforms.color, this.fuelIntensity, 0.0, 0.0);
+    gl.uniform1f(ellipticalSplatProgram.uniforms.useMax, true); // 使用最大值混合，确保燃料持续存在
+
+    // 计算椭圆的归一化半径
+    // 长轴：沿边缘方向（水平或垂直）
+    // 短轴：垂直于边缘方向
+    const maxDimension = Math.max(canvas.width, canvas.height);
+    let radiusX, radiusY;
+    // 顶部或底部边缘：水平椭圆（长轴在 X 方向）
+    radiusX = config.BURN_ELLIPSE_LONG_AXIS / maxDimension;  // 长轴（水平）
+    radiusY = config.BURN_ELLIPSE_SHORT_AXIS / maxDimension; // 短轴（垂直）
+    gl.uniform2f(ellipticalSplatProgram.uniforms.point, this.normX, this.normY);
+    
+    // switch (this.edge) {
+    //   case 'bottom':
+    //   case 'top': {
+    //     // 顶部或底部边缘：水平椭圆（长轴在 X 方向）
+    //     radiusX = config.BURN_ELLIPSE_LONG_AXIS / maxDimension;  // 长轴（水平）
+    //     radiusY = config.BURN_ELLIPSE_SHORT_AXIS / maxDimension; // 短轴（垂直）
+    //     gl.uniform2f(ellipticalSplatProgram.uniforms.point, this.normX, this.normY);
+    //     break;
+    //   }
+    //   case 'left':
+    //   case 'right': {
+    //     // 左侧或右侧边缘：垂直椭圆（长轴在 Y 方向）
+    //     radiusX = config.BURN_ELLIPSE_SHORT_AXIS / maxDimension; // 短轴（水平）
+    //     radiusY = config.BURN_ELLIPSE_LONG_AXIS / maxDimension;  // 长轴（垂直）
+    //     gl.uniform2f(ellipticalSplatProgram.uniforms.point, this.normX, this.normY);
+    //     break;
+    //   }
+    // }
+    
+    // 设置椭圆半径（归一化坐标）
+    gl.uniform2f(ellipticalSplatProgram.uniforms.radius, radiusX, radiusY);
+    
+    // 步骤 1：渲染椭圆到燃料场
+    blit(fuel.write.fbo);
+    fuel.swap();
+    
+    // 步骤 2：添加烟雾（密度场）
+    // 切换到密度场分辨率（更高分辨率）
+    gl.viewport(0, 0, dyeWidth, dyeHeight);
+    gl.uniform1i(ellipticalSplatProgram.uniforms.uTarget, density.read.texId);
+    
+    // 烟雾颜色：灰色（与显示着色器中的灰色一致）
+    const smokeColor = { r: 0.3, g: 0.3, b: 0.3 };
+    // 烟雾强度：根据燃料强度调整，但稍弱一些
+    const smokeIntensity = this.fuelIntensity * 0.6; // 烟雾强度为燃料强度的 60%
+    
+    gl.uniform3f(ellipticalSplatProgram.uniforms.color, smokeColor.r * smokeIntensity, smokeColor.g * smokeIntensity, smokeColor.b * smokeIntensity);
+    gl.uniform1f(ellipticalSplatProgram.uniforms.useMax, false); // 使用加法混合，让烟雾叠加
+    // 烟雾椭圆稍大一些，形成扩散效果
+    const smokeRadiusX = radiusX * 1.2;
+    const smokeRadiusY = radiusY * 1.2;
+    gl.uniform2f(ellipticalSplatProgram.uniforms.radius, smokeRadiusX, smokeRadiusY);
+    blit(density.write.fbo);
+    density.swap();
+  }
+}
+
+/**
+ * 创建爆炸速度场（冲击波效果）
+ * 
+ * @param {number} x - 爆炸中心 X 坐标（像素）
+ * @param {number} y - 爆炸中心 Y 坐标（像素）
+ * @param {string} edge - 碰撞的边界类型
+ */
+function createExplosionVelocity(x, y, edge) {
+  gl.viewport(0, 0, simWidth, simHeight);
+  splatProgram.bind();
+  
+  // 计算爆炸速度方向（从边界向外扩散）
+  let vx = 0, vy = 0;
+  const force = config.MOLOTOV_EXPLOSION_FORCE;
+  
+  switch (edge) {
+    case 'bottom':
+      // 底部边界：速度向上和向两侧扩散
+      vy = -force; // 向上
+      vx = (Math.random() - 0.5) * force * 0.5; // 随机水平分量
+      break;
+    case 'top':
+      // 顶部边界：速度向下和向两侧扩散
+      vy = force; // 向下
+      vx = (Math.random() - 0.5) * force * 0.5;
+      break;
+    case 'left':
+      // 左侧边界：速度向右和向上下扩散
+      vx = force; // 向右
+      vy = (Math.random() - 0.5) * force * 0.5;
+      break;
+    case 'right':
+      // 右侧边界：速度向左和向上下扩散
+      vx = -force; // 向左
+      vy = (Math.random() - 0.5) * force * 0.5;
+      break;
+  }
+  
+  // 归一化坐标
+  const normX = x / canvas.width;
+  const normY = 1.0 - (y / canvas.height); // Y 坐标需要翻转
+  const explosionRadius = config.MOLOTOV_EXPLOSION_RADIUS / Math.max(canvas.width, canvas.height);
+  
+  // 在爆炸位置添加速度扰动
+  gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.texId);
+  gl.uniform1f(splatProgram.uniforms.aspectRatio, canvas.width / canvas.height);
+  gl.uniform2f(splatProgram.uniforms.point, normX, normY);
+  gl.uniform3f(splatProgram.uniforms.color, vx, -vy, 1.0); // 注意 dy 取反
+  gl.uniform1f(splatProgram.uniforms.radius, explosionRadius);
+  gl.uniform1f(splatProgram.uniforms.useMax, false); // 使用加法混合
+  blit(velocity.write.fbo);
+  velocity.swap();
+  
+  // 创建多个速度点以形成更强烈的冲击波
+  const numPoints = 6;
+  for (let i = 0; i < numPoints; i++) {
+    const angle = (i / numPoints) * Math.PI * 2;
+    const offsetX = Math.cos(angle) * explosionRadius * 0.3;
+    const offsetY = Math.sin(angle) * explosionRadius * 0.3;
+    
+    // 径向速度（从中心向外）
+    const radialVx = Math.cos(angle) * force * 0.8;
+    const radialVy = Math.sin(angle) * force * 0.8;
+    
+    gl.uniform2f(splatProgram.uniforms.point, normX + offsetX, normY + offsetY);
+    gl.uniform3f(splatProgram.uniforms.color, radialVx, -radialVy, 1.0);
+    gl.uniform1f(splatProgram.uniforms.radius, explosionRadius * 0.6);
+    blit(velocity.write.fbo);
+    velocity.swap();
+  }
+  
+  // 添加密度场（烟雾/颜色效果）
+  // 使用更高分辨率的密度场
+  gl.viewport(0, 0, dyeWidth, dyeHeight);
+  gl.uniform1i(splatProgram.uniforms.uTarget, density.read.texId);
+  
+  // 爆炸产生的烟雾颜色（橙红色，模拟燃烧产生的烟雾）
+  const smokeColor = { r: 0.8, g: 0.4, b: 0.1 }; // 橙红色烟雾
+  
+  // 在爆炸中心添加密度
+  gl.uniform2f(splatProgram.uniforms.point, normX, normY);
+  gl.uniform3f(splatProgram.uniforms.color, smokeColor.r, smokeColor.g, smokeColor.b);
+  gl.uniform1f(splatProgram.uniforms.radius, explosionRadius * 1.5); // 密度场半径稍大
+  gl.uniform1f(splatProgram.uniforms.useMax, false); // 使用加法混合
+  blit(density.write.fbo);
+  density.swap();
+  
+  // 在周围添加多个密度点，形成烟雾扩散效果
+  for (let i = 0; i < numPoints; i++) {
+    const angle = (i / numPoints) * Math.PI * 2;
+    const offsetX = Math.cos(angle) * explosionRadius * 0.5;
+    const offsetY = Math.sin(angle) * explosionRadius * 0.5;
+    
+    gl.uniform2f(splatProgram.uniforms.point, normX + offsetX, normY + offsetY);
+    gl.uniform3f(splatProgram.uniforms.color, smokeColor.r * 0.6, smokeColor.g * 0.6, smokeColor.b * 0.6); // 稍淡的烟雾
+    gl.uniform1f(splatProgram.uniforms.radius, explosionRadius * 1.2);
+    blit(density.write.fbo);
+    density.swap();
+  }
+}
+
+/**
+ * 在屏幕边缘创建燃烧区域
+ * 
+ * @param {string} edge - 边界类型：'top', 'bottom', 'left', 'right'
+ * @param {number} position - 碰撞位置（像素）
+ */
+function createBurnZone(edge, position) {
+  const radius = config.MOLOTOV_BURN_RADIUS;
+  
+  // 创建持续燃烧区域
+  const burnZone = new BurnZone(edge, position, radius);
+  burnZones.push(burnZone);
+
+  // 立即添加初始燃料（爆炸效果）- 在边缘创建燃烧带
+  burnZone.addFuel();
 }
 
 // ============================================================================
@@ -494,6 +884,7 @@ const shaders = {
   projectionShader: compileShader(gl.FRAGMENT_SHADER, projectionShaderSource),
   rowShader: compileShader(gl.FRAGMENT_SHADER, rowShaderSource),
   splatShader: compileShader(gl.FRAGMENT_SHADER, splatShaderSource),
+  ellipticalSplatShader: compileShader(gl.FRAGMENT_SHADER, ellipticalSplatShaderSource),
   vorticityConfinementShader: compileShader(gl.FRAGMENT_SHADER, vorticityConfinementShaderSource),
 };
 
@@ -861,7 +1252,50 @@ function update () {
   input();              // 处理用户输入
   step(0.016);          // 执行物理模拟（假设 60 FPS，dt = 1/60 ≈ 0.016）
   render();             // 渲染到屏幕
+  renderMolotovs();     // 渲染燃烧瓶（如果启用）
   requestAnimationFrame(update); // 请求下一帧
+}
+
+/**
+ * 渲染燃烧瓶到覆盖层
+ */
+function renderMolotovs() {
+  if (config.IGNITION_MODE !== 1 || molotovs.length === 0) {
+    // 隐藏覆盖层
+    const overlay = document.getElementById('molotov-overlay');
+    if (overlay) overlay.style.display = 'none';
+    return;
+  }
+
+  // 获取或创建覆盖层 canvas
+  let overlay = document.getElementById('molotov-overlay');
+  if (!overlay) {
+    overlay = document.createElement('canvas');
+    overlay.id = 'molotov-overlay';
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.pointerEvents = 'none';
+    overlay.style.zIndex = '10';
+    document.body.appendChild(overlay);
+  }
+  
+  overlay.width = canvas.width;
+  overlay.height = canvas.height;
+  overlay.style.width = canvas.style.width || canvas.width + 'px';
+  overlay.style.height = canvas.style.height || canvas.height + 'px';
+  overlay.style.display = 'block';
+  
+  const ctx = overlay.getContext('2d');
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  
+  // 绘制所有激活的燃烧瓶
+  molotovs.forEach(molotov => {
+    if (molotov.active && !molotov.exploded) {
+      ctx.fillStyle = '#ff0000'; // 红色
+      ctx.fillRect(molotov.x, molotov.y, molotov.width, molotov.height);
+    }
+  });
 }
 
 /**
@@ -869,28 +1303,49 @@ function update () {
  * 
  * 1. 在底部添加燃料（持续的火源）
  * 2. 处理鼠标/触摸输入，添加速度和颜色扰动
+ * 3. 更新燃烧瓶（如果启用燃烧瓶模式）
  */
 function input () {
   // 在底部添加燃料（创建持续的火源）
   // 这模拟了燃料从底部持续供应的效果
   gl.viewport(0, 0, simWidth, simHeight);
-  rowProgram.bind();
-  gl.uniform2f(rowProgram.uniforms.texelSize, 1.0 / simWidth, 1.0 / simHeight); // 纹理像素大小
-  gl.uniform1f(rowProgram.uniforms.y, 10.0); // 底部行位置（像素）
-  gl.uniform1i(rowProgram.uniforms.uTarget, fuel.read.texId); // 目标纹理（燃料场）
-  gl.uniform1f(rowProgram.uniforms.useMax, true); // 使用最大值混合（确保燃料持续存在）
-  blit(fuel.write.fbo); // 执行着色器
-  fuel.swap(); // 交换缓冲区
+  // rowProgram.bind();
+  // gl.uniform2f(rowProgram.uniforms.texelSize, 1.0 / simWidth, 1.0 / simHeight); // 纹理像素大小
+  // gl.uniform1f(rowProgram.uniforms.y, 10.0); // 底部行位置（像素）
+  // gl.uniform1i(rowProgram.uniforms.uTarget, fuel.read.texId); // 目标纹理（燃料场）
+  // gl.uniform1f(rowProgram.uniforms.useMax, true); // 使用最大值混合（确保燃料持续存在）
+  // blit(fuel.write.fbo); // 执行着色器
+  // fuel.swap(); // 交换缓冲区
 
-  // 处理所有指针（鼠标/触摸）的输入
-  for (let i = 0; i < pointers.length; i++) {
-    const pointer = pointers[i];
-    if (pointer.moved) {
-      // 如果指针移动了，添加扰动（速度、燃料和颜色）
-      splat(pointer.x, pointer.y, pointer.dx, pointer.dy, pointer.color);
-      pointer.moved = false; // 重置移动标志
+  // 根据点火模式处理输入
+  if (config.IGNITION_MODE === 0) {
+    // 拖拽点火模式
+    for (let i = 0; i < pointers.length; i++) {
+      const pointer = pointers[i];
+      if (pointer.moved || pointer.down) {
+        // 如果指针移动了，添加扰动（速度、燃料和颜色）
+        splat(pointer.x, pointer.y, pointer.dx, pointer.dy, pointer.color);
+        pointer.moved = false; // 重置移动标志
+      }
     }
   }
+  // 燃烧瓶模式在鼠标事件中处理
+
+  // 更新所有燃烧瓶和燃烧区域
+  const dt = 0.016; // 假设 60 FPS
+  molotovs = molotovs.filter(molotov => {
+    molotov.update(dt);
+    return molotov.active || !molotov.exploded; // 保留未爆炸的或刚爆炸的（用于清理）
+  });
+
+  // 更新所有燃烧区域的寿命并添加燃料
+  burnZones = burnZones.filter(burnZone => {
+    burnZone.update(dt); // 更新寿命
+    if (burnZone.active) {
+      burnZone.addFuel(); // 添加燃料
+    }
+    return burnZone.active; // 只保留激活的燃烧区域
+  });
 }
 
 /**
@@ -907,6 +1362,11 @@ function resizeCanvas () {
     canvas.height = canvas.clientHeight;
     // 重新初始化所有帧缓冲（使用新的分辨率）
     initFramebuffers();
+    
+    // 重新计算所有燃烧区域的归一化坐标（因为画布尺寸改变了）
+    burnZones.forEach(burnZone => {
+      burnZone.calculateNormalizedCoords();
+    });
   }
 }
 
@@ -1049,6 +1509,10 @@ function splat (x, y, dx, dy, color) {
 // 输入系统
 let pointers = [new pointerPrototype()]; // 指针数组（鼠标/触摸）
 let fireSources = [];                     // 火焰粒子发射器数组
+let molotovs = [];                        // 燃烧瓶数组
+let currentMolotov = null;                // 当前正在拖拽的燃烧瓶
+let molotovCtx = null;                    // 用于渲染燃烧瓶的 2D 上下文
+let burnZones = [];                       // 持续燃烧区域数组
 
 // 分辨率变量
 let simWidth;   // 模拟场宽度（速度、温度、压力等）
@@ -1087,6 +1551,7 @@ let pressureIterationProgram;    // 压力迭代程序
 let projectionProgram;           // 压力投影程序
 let rowProgram;                   // 行程序（添加燃料）
 let splatProgram;                 // 溅射程序
+let ellipticalSplatProgram;      // 椭圆溅射程序（用于边缘燃烧）
 let vorticityConfinementProgram; // 涡度限制程序
 
 // ============================================================================
@@ -1297,13 +1762,13 @@ function step (dt) {
   // ========================================================================
   // 持续添加噪声以保持湍流效果，使火焰更自然
   // 噪声随时间变化，产生动态的湍流效果
-  addNoiseProgram.bind();
-  gl.uniform2f(addNoiseProgram.uniforms.texelSize, 1.0 / simWidth, 1.0 / simHeight);
-  gl.uniform1f(addNoiseProgram.uniforms.time, (new Date()).getTime() / 1.e4 % 1); // 时间参数（循环）
-  gl.uniform1i(addNoiseProgram.uniforms.uTarget, noise.read.texId);
-  gl.uniform1f(addNoiseProgram.uniforms.blendLevel, config.NOISE_VOLATILITY); // 噪声混合量
-  blit(noise.write.fbo);
-  noise.swap();
+  // addNoiseProgram.bind();
+  // gl.uniform2f(addNoiseProgram.uniforms.texelSize, 1.0 / simWidth, 1.0 / simHeight);
+  // gl.uniform1f(addNoiseProgram.uniforms.time, (new Date()).getTime() / 1.e4 % 1); // 时间参数（循环）
+  // gl.uniform1i(addNoiseProgram.uniforms.uTarget, noise.read.texId);
+  // gl.uniform1f(addNoiseProgram.uniforms.blendLevel, config.NOISE_VOLATILITY); // 噪声混合量
+  // blit(noise.write.fbo);
+  // noise.swap();
 
   // ========================================================================
   // 步骤 9：更新粒子系统
@@ -1347,6 +1812,7 @@ function main () {
   projectionProgram         = new GLProgram(shaders.baseVertexShader, shaders.projectionShader);
   rowProgram                = new GLProgram(shaders.baseVertexShader, shaders.rowShader);
   splatProgram              = new GLProgram(shaders.baseVertexShader, shaders.splatShader);
+  ellipticalSplatProgram   = new GLProgram(shaders.baseVertexShader, shaders.ellipticalSplatShader);
   vorticityConfinementProgram = new GLProgram(shaders.baseVertexShader, shaders.vorticityConfinementShader);
 
   // 初始化所有帧缓冲（速度、密度、温度、燃料等）
@@ -1371,13 +1837,22 @@ function main () {
 // ============================================================================
 // 鼠标移动事件：更新指针位置和速度
 canvas.addEventListener('mousemove', (e) => {
-  pointers[0].moved = pointers[0].down; // 只有在按下时才标记为移动
-  // 计算速度（位置差乘以缩放因子）
-  pointers[0].dx = (e.offsetX - pointers[0].x) * 5.0;
-  pointers[0].dy = (e.offsetY - pointers[0].y) * 5.0;
-  // 更新位置
-  pointers[0].x = e.offsetX;
-  pointers[0].y = e.offsetY;
+  if (config.IGNITION_MODE === 1) {
+    // 燃烧瓶模式：更新燃烧瓶位置（跟随鼠标，仅在拖拽时）
+    if (currentMolotov && currentMolotov.active && currentMolotov.isDragging) {
+      currentMolotov.x = e.offsetX - currentMolotov.width / 2;
+      currentMolotov.y = e.offsetY - currentMolotov.height / 2;
+    }
+  } else {
+    // 拖拽点火模式
+    pointers[0].moved = pointers[0].down; // 只有在按下时才标记为移动
+    // 计算速度（位置差乘以缩放因子）
+    pointers[0].dx = (e.offsetX - pointers[0].x) * 5.0;
+    pointers[0].dy = (e.offsetY - pointers[0].y) * 5.0;
+    // 更新位置
+    pointers[0].x = e.offsetX;
+    pointers[0].y = e.offsetY;
+  }
 });
 
 // 触摸移动事件：支持多点触摸
@@ -1396,9 +1871,17 @@ canvas.addEventListener('touchmove', (e) => {
 }, false);
 
 // 鼠标按下事件：开始交互
-canvas.addEventListener('mousedown', () => {
-  pointers[0].down = true;
-  pointers[0].color = generateColor(); // 为此次交互生成随机颜色
+canvas.addEventListener('mousedown', (e) => {
+  if (config.IGNITION_MODE === 1) {
+    // 燃烧瓶模式：创建燃烧瓶（跟随鼠标）
+    currentMolotov = new Molotov(e.offsetX - 15, e.offsetY - 25); // 居中显示
+    currentMolotov.isDragging = true; // 标记为正在拖拽
+    molotovs.push(currentMolotov);
+  } else {
+    // 拖拽点火模式
+    pointers[0].down = true;
+    pointers[0].color = generateColor(); // 为此次交互生成随机颜色
+  }
 });
 
 // 触摸开始事件：支持多点触摸
@@ -1421,7 +1904,16 @@ canvas.addEventListener('touchstart', (e) => {
 
 // 鼠标释放事件
 window.addEventListener('mouseup', () => {
-  pointers[0].down = false;
+  if (config.IGNITION_MODE === 1) {
+    // 燃烧瓶模式：释放燃烧瓶，开始下落
+    if (currentMolotov) {
+      currentMolotov.isDragging = false; // 停止拖拽，开始物理下落
+      currentMolotov = null; // 清除当前引用，让燃烧瓶自由下落
+    }
+  } else {
+    // 拖拽点火模式
+    pointers[0].down = false;
+  }
 });
 
 // 触摸结束事件：根据触摸 ID 匹配并释放相应的指针
@@ -1433,10 +1925,15 @@ window.addEventListener('touchend', (e) => {
         pointers[j].down = false;
 });
 
-// 键盘事件：空格键切换显示模式
+// 键盘事件：空格键切换显示模式（保留作为快捷方式）
 window.addEventListener('keydown', (e) => {
   if (e.key === " ") {
     config.DISPLAY_MODE = (config.DISPLAY_MODE + 1) % DISPLAY_MODES.length;
+    // 同步更新下拉菜单
+    const displayModeSelect = document.getElementById('displayMode');
+    if (displayModeSelect) {
+      displayModeSelect.value = config.DISPLAY_MODE.toString();
+    }
   }
 });
 
@@ -1479,3 +1976,103 @@ function generateColor () {
 // ============================================================================
 // 启动程序
 main();
+
+// 初始化 Panel 控件事件监听器
+// 在 DOM 加载完成后设置控件事件
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initPanelControls);
+} else {
+  // DOM 已经加载完成
+  initPanelControls();
+}
+
+/**
+ * 初始化 Panel 控件的事件监听器
+ */
+function initPanelControls() {
+  // 显示模式下拉菜单
+  const displayModeSelect = document.getElementById('displayMode');
+  if (displayModeSelect) {
+    displayModeSelect.value = config.DISPLAY_MODE.toString();
+    displayModeSelect.addEventListener('change', (e) => {
+      config.DISPLAY_MODE = parseInt(e.target.value);
+    });
+  }
+
+  // 点火方式下拉菜单
+  const ignitionModeSelect = document.getElementById('ignitionMode');
+  if (ignitionModeSelect) {
+    ignitionModeSelect.value = config.IGNITION_MODE.toString();
+    ignitionModeSelect.addEventListener('change', (e) => {
+      config.IGNITION_MODE = parseInt(e.target.value);
+      if (config.IGNITION_MODE === 0) {
+        molotovs = [];
+        currentMolotov = null;
+      }
+    });
+  }
+
+  // 物理参数滑块
+  setupSlider('buoyancy', 'buoyancyValue', (val) => {
+    config.BUOYANCY = parseFloat(val);
+  }, config.BUOYANCY);
+
+  setupSlider('cooling', 'coolingValue', (val) => {
+    config.COOLING = parseFloat(val);
+  }, config.COOLING);
+
+  setupSlider('confinement', 'confinementValue', (val) => {
+    config.CONFINEMENT = parseFloat(val);
+  }, config.CONFINEMENT);
+
+  // 燃烧瓶参数滑块
+  setupSlider('burnZoneLifespan', 'burnZoneLifespanValue', (val) => {
+    config.BURN_ZONE_LIFESPAN = parseFloat(val);
+    // 更新现有燃烧区域的最大寿命
+    burnZones.forEach(burnZone => {
+      burnZone.maxLifespan = config.BURN_ZONE_LIFESPAN;
+    });
+  }, config.BURN_ZONE_LIFESPAN);
+
+  setupSlider('ellipseLongAxis', 'ellipseLongAxisValue', (val) => {
+    config.BURN_ELLIPSE_LONG_AXIS = parseFloat(val);
+  }, config.BURN_ELLIPSE_LONG_AXIS);
+
+  setupSlider('ellipseShortAxis', 'ellipseShortAxisValue', (val) => {
+    config.BURN_ELLIPSE_SHORT_AXIS = parseFloat(val);
+  }, config.BURN_ELLIPSE_SHORT_AXIS);
+
+  setupSlider('explosionForce', 'explosionForceValue', (val) => {
+    config.MOLOTOV_EXPLOSION_FORCE = parseFloat(val);
+  }, config.MOLOTOV_EXPLOSION_FORCE);
+
+  setupSlider('explosionRadius', 'explosionRadiusValue', (val) => {
+    config.MOLOTOV_EXPLOSION_RADIUS = parseFloat(val);
+  }, config.MOLOTOV_EXPLOSION_RADIUS);
+}
+
+/**
+ * 设置滑块控件
+ * 
+ * @param {string} sliderId - 滑块元素 ID
+ * @param {string} valueId - 显示值的元素 ID
+ * @param {Function} callback - 值变化时的回调函数
+ * @param {number} initialValue - 初始值
+ */
+function setupSlider(sliderId, valueId, callback, initialValue) {
+  const slider = document.getElementById(sliderId);
+  const valueDisplay = document.getElementById(valueId);
+  
+  if (slider && valueDisplay) {
+    // 设置初始值
+    slider.value = initialValue;
+    valueDisplay.textContent = initialValue;
+    
+    // 监听滑块变化
+    slider.addEventListener('input', (e) => {
+      const value = parseFloat(e.target.value);
+      valueDisplay.textContent = value;
+      callback(value);
+    });
+  }
+}

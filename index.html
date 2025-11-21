@@ -43,19 +43,73 @@
     </div>
 
     <canvas id="glCanvas"></canvas>
-    <div id="panel" style="position:fixed;top:12px;left:12px;padding:10px 12px;background:rgba(20,20,20,0.75);color:#eee;font-family:system-ui,Segoe UI,Arial;font-size:12px;border-radius:8px;backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,0.08);">
+    <div id="panel" style="position:fixed;top:12px;left:12px;padding:10px 12px;background:rgba(20,20,20,0.75);color:#eee;font-family:system-ui,Segoe UI,Arial;font-size:12px;border-radius:8px;backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,0.08);max-height:90vh;overflow-y:auto;">
       <div style="margin-bottom:6px;font-weight:600;">Fire Controls</div>
-      <label>Particles: <select id="texSize"><option>128</option><option selected>256</option><option>512</option></select></label>
+      
+      <label>Display Mode: <select id="displayMode">
+        <option value="0">Normal</option>
+        <option value="1">DebugFire</option>
+        <option value="2">DebugTemperature</option>
+        <option value="3">DebugFuel</option>
+        <option value="4">DebugPressure</option>
+        <option value="5">DebugDensity</option>
+        <option value="6">DebugNoise</option>
+      </select></label>
       <br/>
-      <label>Upward: <input id="forceUp" type="range" min="0.1" max="0.6" step="0.01" value="0.35"/></label>
+      
+      <label>Ignition Mode: <select id="ignitionMode">
+        <option value="0">Drag (Splat)</option>
+        <option value="1">Molotov</option>
+      </select></label>
       <br/>
-      <label>Damping: <input id="damping" type="range" min="0.90" max="0.995" step="0.001" value="0.965"/></label>
-      <br/>
-      <label>Noise: <input id="noise" type="range" min="0.00" max="0.20" step="0.005" value="0.06"/></label>
-      <br/>
-      <label>Vy Max: <input id="vyMax" type="range" min="0.3" max="1.0" step="0.01" value="0.6"/></label>
-      <br/>
-      <label>Spawn: <input id="spawn" type="range" min="0.0" max="0.15" step="0.005" value="0.02"/></label>
+      
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.1);">
+        <div style="font-weight:600;margin-bottom:6px;">Physics Parameters</div>
+        
+        <label style="display:block;margin-bottom:4px;">
+          Buoyancy: <span id="buoyancyValue">0.2</span>
+          <input type="range" id="buoyancy" min="0" max="1" step="0.01" value="0.2" style="width:100%;margin-top:2px;">
+        </label>
+        
+        <label style="display:block;margin-bottom:4px;">
+          Cooling: <span id="coolingValue">3000</span>
+          <input type="range" id="cooling" min="0" max="10000" step="100" value="3000" style="width:100%;margin-top:2px;">
+        </label>
+        
+        <label style="display:block;margin-bottom:4px;">
+          Vorticity: <span id="confinementValue">50</span>
+          <input type="range" id="confinement" min="0" max="50" step="1" value="50" style="width:100%;margin-top:2px;">
+        </label>
+      </div>
+      
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.1);">
+        <div style="font-weight:600;margin-bottom:6px;">Molotov Parameters</div>
+        
+        <label style="display:block;margin-bottom:4px;">
+          Burn Zone Lifespan: <span id="burnZoneLifespanValue">40</span>s
+          <input type="range" id="burnZoneLifespan" min="5" max="120" step="5" value="40" style="width:100%;margin-top:2px;">
+        </label>
+        
+        <label style="display:block;margin-bottom:4px;">
+          Ellipse Long Axis: <span id="ellipseLongAxisValue">200</span>px
+          <input type="range" id="ellipseLongAxis" min="50" max="500" step="10" value="200" style="width:100%;margin-top:2px;">
+        </label>
+        
+        <label style="display:block;margin-bottom:4px;">
+          Ellipse Short Axis: <span id="ellipseShortAxisValue">45</span>px
+          <input type="range" id="ellipseShortAxis" min="10" max="200" step="5" value="45" style="width:100%;margin-top:2px;">
+        </label>
+        
+        <label style="display:block;margin-bottom:4px;">
+          Explosion Force: <span id="explosionForceValue">50</span>
+          <input type="range" id="explosionForce" min="0" max="200" step="5" value="50" style="width:100%;margin-top:2px;">
+        </label>
+        
+        <label style="display:block;margin-bottom:4px;">
+          Explosion Radius: <span id="explosionRadiusValue">80</span>px
+          <input type="range" id="explosionRadius" min="20" max="200" step="5" value="80" style="width:100%;margin-top:2px;">
+        </label>
+      </div>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>

@@ -35,5 +35,23 @@ void main () {
   // float visibility = 1.;
   vec4 density = texture2D(uDensity, vUv);
 
-  gl_FragColor = vec4(visibility*blackbody(temp), 1.0);
+  // 计算火焰颜色（基于温度和燃料）
+  vec3 fireColor = visibility * blackbody(temp);
+  
+  // 计算烟雾强度（基于密度场的亮度）
+  float smokeIntensity = length(density.rgb); // 烟雾强度基于颜色亮度
+  
+  // 烟雾统一为灰色
+  vec3 smokeColor = vec3(0.2, 0.2, 0.2); // 深灰色烟雾
+  
+  // 混合火焰和烟雾
+  // 烟雾是半透明的，叠加在火焰上
+  // 使用 alpha blending：final = fire * (1 - smoke_alpha) + smoke * smoke_alpha
+  float smokeAlpha = min(smokeIntensity * 0.8, 0.9); // 烟雾透明度，最大 90%
+  vec3 finalColor = mix(fireColor, smokeColor, smokeAlpha);
+  
+  // 如果烟雾很强，可以稍微减弱火焰亮度
+  finalColor = mix(finalColor, fireColor, 1.0 - smokeAlpha * 0.3);
+  
+  gl_FragColor = vec4(finalColor, 1.0);
 }
