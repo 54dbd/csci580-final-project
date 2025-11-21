@@ -10,6 +10,7 @@
         margin: 0;
         padding: 0;
         box-sizing: border-box;
+        user-select: none;
       }
       
       html, body {
@@ -27,10 +28,21 @@
         width: 100vw;
         height: 100vh;
       }
+      #debug-box {
+        position: fixed;
+        z-index: 1;
+        background-color: transparent;
+        color: #fff;
+        font-family: monospace;
+      }
+
     </style>
   </head>
   <body>
-    <canvas id="canvas"></canvas>
+    <div id="debug-box">
+    </div>
+
+    <canvas id="glCanvas"></canvas>
     <div id="panel" style="position:fixed;top:12px;left:12px;padding:10px 12px;background:rgba(20,20,20,0.75);color:#eee;font-family:system-ui,Segoe UI,Arial;font-size:12px;border-radius:8px;backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,0.08);">
       <div style="margin-bottom:6px;font-weight:600;">Fire Controls</div>
       <label>Particles: <select id="texSize"><option>128</option><option selected>256</option><option>512</option></select></label>
