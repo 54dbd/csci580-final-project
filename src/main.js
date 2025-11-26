@@ -81,6 +81,9 @@ let config = {
   BURN_ELLIPSE_SHORT_AXIS: 45, // 椭圆短轴半径（像素）- 垂直于边缘方向
   MOLOTOV_EXPLOSION_FORCE: 50.0, // 爆炸产生的速度场强度
   MOLOTOV_EXPLOSION_RADIUS: 80.0, // 爆炸影响半径（像素）
+  SPARK_GRAVITY : 0.35,
+  MIN_SPARKS: 5,
+  MAX_SPARKS: 10,
 };
 
 /**
@@ -368,8 +371,8 @@ class Molotov {
 
     // ================== 4. 小火球（Spark） ==================
     // 数量：5~10 个
-    const minSparks = 5;
-    const maxSparks = 10;
+    const minSparks = config.MIN_SPARKS;
+    const maxSparks = config.MAX_SPARKS;
     const numSparks = minSparks + Math.floor(Math.random() * (maxSparks - minSparks + 1));
 
     // 水平初速度：随高度插值
@@ -429,7 +432,7 @@ class Spark {
     if (!this.alive) return;
 
     // 比瓶子小很多的重力，让火花飞得更久一点
-    this.vy += config.MOLOTOV_GRAVITY * 0.35 * dt;
+    this.vy += config.MOLOTOV_GRAVITY * config.SPARK_GRAVITY * dt;
 
     // 更新位置
     this.x += this.vx * dt;
@@ -2251,6 +2254,16 @@ function initPanelControls() {
   setupSlider('explosionRadius', 'explosionRadiusValue', (val) => {
     config.MOLOTOV_EXPLOSION_RADIUS = parseFloat(val);
   }, config.MOLOTOV_EXPLOSION_RADIUS);
+
+  setupSlider('sparkGravity', 'sparkGravityValue',(val)=>{
+    config.SPARK_GRAVITY = parseFloat(val);
+  }, config.SPARK_GRAVITY)
+  setupSlider('maxSpark', 'maxSparkValue',(val)=>{
+    config.MAX_SPARKS = parseFloat(val);
+  }, config.MAX_SPARKS)
+  setupSlider('minSpark', 'minSparkValue',(val)=>{
+    config.MIN_SPARKS = parseFloat(val);
+  }, config.MIN_SPARKS)
 }
 
 /**
